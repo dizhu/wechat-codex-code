@@ -43,9 +43,12 @@ export function createMonitor(api: WeChatApi, callbacks: MonitorCallbacks, accou
         }
 
         if (code !== undefined && code !== 0) {
-          logger.warn('getUpdates returned error', { ret: code, retmsg: codeMsg });
-          // Unknown error code: back off instead of hot-looping the API.
-          await sleep(BACKOFF_SHORT_MS, controller.signal);
+          consecutiveFailures++;
+          const backoff = consecutiveFailures >= BACKOFF_THRESHOLD ? BACKOFF_LONG_MS : BACKOFF_SHORT_MS;
+          logger.warn('getUpdates returned error', { ret: code, retmsg: codeMsg, consecutiveFailures });
+          // Server-reported error: escalate backoff like transport failures so a
+          // persistent HTTP-200-plus-error-code response can't hot-loop the API.
+          await sleep(backoff, controller.signal);
           continue;
         }
 

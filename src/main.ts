@@ -1,6 +1,7 @@
 import { createInterface } from 'node:readline';
 import process from 'node:process';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { join, basename } from 'node:path';
 import { unlinkSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -337,9 +338,17 @@ function createBotMonitor(
     return `${account.accountId}__${safeUserId}`;
   }
 
-  /** Filesystem-safe short id for a per-user working directory. */
+  /**
+   * Filesystem-safe per-user working-directory name. A readable prefix plus an
+   * 8-hex-char hash of the FULL id, so two distinct authorized users whose ids
+   * sanitize to the same prefix (e.g. `a@x` vs `a#x`, or any that reduce to
+   * empty) never collapse to the same workspace root — which would let one read
+   * the other's files via /send and clobber their work.
+   */
   function shortId(userId: string): string {
-    return userId.replace(/@.*$/, '').replace(/[^a-zA-Z0-9_-]/g, '') || 'user';
+    const readable = userId.replace(/@.*$/, '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32) || 'user';
+    const hash = createHash('sha256').update(userId).digest('hex').slice(0, 8);
+    return `${readable}-${hash}`;
   }
 
   /** Owner is always allowed; everyone else must be in the config allowlist. */
@@ -746,8 +755,12 @@ async function sendToCodex(
       await sender.sendText(fromUserId, contextToken, 'Codex 无返回内容（可能因权限被拒而终止）');
     }
 
-    // Update session with new SDK session ID
-    session.sdkSessionId = result.sessionId || undefined;
+    // Update session with new SDK session ID. Only overwrite when this turn
+    // produced one: a resumed turn that doesn't re-emit thread.started must keep
+    // the existing id so the next message can still resume the same Codex thread
+    // (don't wipe conversation context to undefined). A fresh thread always
+    // emits one, and the resume-failure path above already cleared it explicitly.
+    if (result.sessionId) session.sdkSessionId = result.sessionId;
     session.state = 'idle';
     sessionStore.save(sessionKey, session);
 
@@ -764,18 +777,20 @@ async function sendToCodex(
       // /tmp are symlinks, so a plain resolve() would mismatch and drop files.
       const canon = (p: string): string => { try { return realpathSync(p); } catch { return resolve(p); } };
       const cwdReal = canon(cwd);
-      const dataDirReal = canon(DATA_DIR);
+      // Credential/secret stores to exclude even when they sit inside cwd: the
+      // daemon's own data dir AND the Codex home (auth.json, session transcripts).
+      const excludedRoots = [DATA_DIR, process.env.CODEX_HOME || join(homedir(), '.codex')].map(canon);
       const pushable = detectedPaths.filter(f => {
         const ext = extname(f).toLowerCase();
         if (!AUTO_PUSH_EXTENSIONS.has(ext) || !existsSync(f)) return false;
         const fr = canon(f);
         // Only auto-push files inside the session's working directory, and never
-        // the daemon's own data/credential store — otherwise merely mentioning a
-        // path (e.g. another bot's account token) would exfiltrate it to whoever
-        // is chatting. The detector matches any absolute path in the response.
+        // a credential store — otherwise merely mentioning a path (e.g. another
+        // bot's account token or ~/.codex/auth.json) would exfiltrate it to
+        // whoever is chatting. The detector matches any absolute path in the text.
         const inCwd = fr === cwdReal || fr.startsWith(cwdReal + sep);
-        const inDataDir = fr === dataDirReal || fr.startsWith(dataDirReal + sep);
-        return inCwd && !inDataDir;
+        const inExcluded = excludedRoots.some(r => fr === r || fr.startsWith(r + sep));
+        return inCwd && !inExcluded;
       });
       if (pushable.length > 0) {
         const failedFiles: string[] = [];
