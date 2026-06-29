@@ -41,9 +41,10 @@ macos_start() {
 
   mkdir -p "$DATA_DIR/logs"
 
-  # Collect Codex/OpenAI env vars for plist
+  # Collect Codex/OpenAI + bridge (WCX_*) env vars for plist, so settings like
+  # WCX_SANDBOX set in the launching shell actually reach the managed service.
   local plist_extra_env=""
-  for var in OPENAI_API_KEY OPENAI_BASE_URL CODEX_HOME; do
+  for var in OPENAI_API_KEY OPENAI_BASE_URL CODEX_HOME WCX_SANDBOX WCX_SHOW_COMMANDS WCX_DATA_DIR WCX_LOG_FULL_BODY; do
     if [ -n "${!var:-}" ]; then
       plist_extra_env="${plist_extra_env}    <key>${var}</key>
     <string>${!var}</string>
@@ -173,9 +174,10 @@ linux_create_service_file() {
 
   mkdir -p "$(dirname "$service_file")"
 
-  # Collect Codex/OpenAI env vars to pass through to the service
+  # Collect Codex/OpenAI + bridge (WCX_*) env vars to pass through to the service,
+  # so settings like WCX_SANDBOX set in the launching shell reach the unit.
   local extra_env=""
-  for var in OPENAI_API_KEY OPENAI_BASE_URL CODEX_HOME; do
+  for var in OPENAI_API_KEY OPENAI_BASE_URL CODEX_HOME WCX_SANDBOX WCX_SHOW_COMMANDS WCX_DATA_DIR WCX_LOG_FULL_BODY; do
     if [ -n "${!var:-}" ]; then
       extra_env="${extra_env}Environment=${var}=${!var}
 "
