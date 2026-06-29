@@ -24,7 +24,8 @@ import { MessageType, type WeixinMessage } from './wechat/types.js';
 // Helpers
 // ---------------------------------------------------------------------------
 
-const MAX_MESSAGE_LENGTH = 4000;
+const MAX_MESSAGE_LENGTH = 3900;
+const STREAM_PARTIAL_TEXT = process.env.WCX_STREAM_TEXT === '1';
 
 // Extensions eligible for auto-push when detected in Codex's response
 const AUTO_PUSH_EXTENSIONS = new Set([
@@ -401,7 +402,17 @@ function createBotMonitor(
     try {
       while (rt.queue.length > 0) {
         const msg = rt.queue.shift()!;
-        await handleMessage(msg, account, sessionKeyFor(userId), rt.session, sessionStore, sender, config, activeControllers);
+        try {
+          await handleMessage(msg, account, sessionKeyFor(userId), rt.session, sessionStore, sender, config, activeControllers);
+        } catch (err) {
+          rt.session.state = 'idle';
+          sessionStore.save(sessionKeyFor(userId), rt.session);
+          logger.error('Unhandled message processing failure', {
+            userId,
+            messageId: msg.message_id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
     } finally {
       // INVARIANT: clear `processing` BEFORE the queue check below. The re-enter
@@ -411,7 +422,11 @@ function createBotMonitor(
       rt.processing = false;
       // If a handler threw (or a message arrived during the final await), make
       // sure remaining messages aren't stranded until the user sends another.
-      if (rt.queue.length > 0) drainQueue(userId).catch(() => { /* logged downstream */ });
+      if (rt.queue.length > 0) {
+        drainQueue(userId).catch((err) => {
+          logger.error('Queue drain failed', { userId, error: err instanceof Error ? err.message : String(err) });
+        });
+      }
     }
   }
 
@@ -445,7 +460,9 @@ function createBotMonitor(
       }
       if (handlePriorityCommand(msg)) return;
       getRuntime(userId).queue.push(msg);
-      drainQueue(userId);
+      drainQueue(userId).catch((err) => {
+        logger.error('Queue drain failed', { userId, error: err instanceof Error ? err.message : String(err) });
+      });
     },
     onSessionExpired: () => {
       logger.warn('Session expired, will keep retrying...', { botId: account.accountId });
@@ -585,6 +602,25 @@ async function sendToCodex(
   // Start typing indicator (keepalive until stopTyping is called)
   const stopTyping = sender.startTyping(fromUserId, contextToken);
 
+  async function safeSendText(text: string, label: string): Promise<boolean> {
+    try {
+      await sender.sendText(fromUserId, contextToken, text);
+      return true;
+    } catch (err) {
+      logger.error(`${label} send failed`, { error: err instanceof Error ? err.message : String(err) });
+      return false;
+    }
+  }
+
+  async function safeSendChunks(text: string, label: string): Promise<boolean> {
+    let allSent = true;
+    for (const chunk of splitMessage(text)) {
+      const ok = await safeSendText(chunk, label);
+      if (!ok) allSent = false;
+    }
+    return allSent;
+  }
+
   try {
     // Download image if present
     let images: QueryOptions['images'];
@@ -623,8 +659,8 @@ async function sendToCodex(
     let anySent = false;
     let lastSentTime = Date.now();
 
-    const MIN_BATCH_FLUSH_LEN = 30;
-    const SOFT_FLUSH_LIMIT = 3800;
+    const MIN_BATCH_FLUSH_LEN = STREAM_PARTIAL_TEXT ? 800 : Number.POSITIVE_INFINITY;
+    const SOFT_FLUSH_LIMIT = 3600;
 
     /** Check if buffer ends at a structural boundary (double newline or horizontal rule). */
     function endsWithStructuralBoundary(text: string): boolean {
@@ -643,11 +679,8 @@ async function sendToCodex(
       if (!captured) return flushChain;
 
       flushChain = flushChain.then(async () => {
-        const chunks = splitMessage(captured);
-        for (const chunk of chunks) {
-          await sender.sendText(fromUserId, contextToken, chunk);
-        }
-        anySent = true;
+        const sent = await safeSendChunks(captured, 'flushText');
+        if (sent) anySent = true;
         lastSentTime = Date.now();
       }).catch((err) => {
         logger.error('flushText send failed', { error: err instanceof Error ? err.message : String(err) });
@@ -681,7 +714,7 @@ async function sendToCodex(
 
         // Flush at structural boundaries (only if buffer is substantial) or when approaching size limit
         const shouldFlush =
-          (endsWithStructuralBoundary(textBuffer) && textBuffer.trim().length >= MIN_BATCH_FLUSH_LEN)
+          (STREAM_PARTIAL_TEXT && endsWithStructuralBoundary(textBuffer) && textBuffer.trim().length >= MIN_BATCH_FLUSH_LEN)
           || textBuffer.length > SOFT_FLUSH_LIMIT;
 
         if (shouldFlush) {
@@ -689,7 +722,7 @@ async function sendToCodex(
         }
       },
       onBlockEnd: () => {
-        if (textBuffer.trim().length >= MIN_BATCH_FLUSH_LEN || textBuffer.length > SOFT_FLUSH_LIMIT) {
+        if ((STREAM_PARTIAL_TEXT && textBuffer.trim().length >= MIN_BATCH_FLUSH_LEN) || textBuffer.length > SOFT_FLUSH_LIMIT) {
           flushText();
         }
       },
@@ -706,7 +739,7 @@ async function sendToCodex(
     }
 
     // If resume failed (e.g. corrupted session), retry without resume
-    if (result.error && queryOptions.resume) {
+    if (result.error && !result.text && queryOptions.resume) {
       logger.warn('Resume failed, retrying without resume', { error: result.error, sessionId: queryOptions.resume });
       queryOptions.resume = undefined;
       session.sdkSessionId = undefined;
@@ -739,10 +772,7 @@ async function sendToCodex(
       sessionStore.addChatMessage(session, 'assistant', result.text);
       // If nothing was streamed at all (e.g. streaming not supported), send full text now
       if (!anySent) {
-        const chunks = splitMessage(result.text);
-        for (const chunk of chunks) {
-          await sender.sendText(fromUserId, contextToken, chunk);
-        }
+        await safeSendChunks(result.text, 'resultText');
       }
     } else if (result.error) {
       logger.error('Codex query error', { error: result.error });
@@ -750,9 +780,9 @@ async function sendToCodex(
       // most common first-run failures (codex not on PATH, auth failure) are
       // otherwise invisible from the phone and only visible in the daemon log.
       const detail = String(result.error).slice(0, 300);
-      await sender.sendText(fromUserId, contextToken, `Codex 处理请求时出错：${detail}`);
+      await safeSendText(`Codex 处理请求时出错：${detail}`, 'codexError');
     } else if (!anySent) {
-      await sender.sendText(fromUserId, contextToken, 'Codex 无返回内容（可能因权限被拒而终止）');
+      await safeSendText('Codex 无返回内容（可能因权限被拒而终止）', 'emptyResponse');
     }
 
     // Update session with new SDK session ID. Only overwrite when this turn
@@ -837,7 +867,7 @@ async function sendToCodex(
     } else {
       const errorMsg = err instanceof Error ? err.message : String(err);
       logger.error('Error in sendToCodex', { error: errorMsg });
-      await sender.sendText(fromUserId, contextToken, '处理消息时出错，请稍后重试。');
+      await safeSendText('处理消息时出错，请稍后重试。', 'fallbackError');
     }
     session.state = 'idle';
     sessionStore.save(sessionKey, session);

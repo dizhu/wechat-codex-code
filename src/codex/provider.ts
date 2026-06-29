@@ -67,6 +67,10 @@ function cleanupTempFiles(paths: string[]): void {
   }
 }
 
+function isNonFatalCodexNotice(message: string): boolean {
+  return message.startsWith('Skill descriptions were shortened to fit the 2% skills context budget.');
+}
+
 // ---------------------------------------------------------------------------
 // Core function
 // ---------------------------------------------------------------------------
@@ -321,8 +325,12 @@ export async function codexQuery(options: QueryOptions): Promise<QueryResult> {
               break;
             case 'error':
               if (completed && typeof item.message === 'string') {
-                errorMessage = item.message;
-                logger.error('Codex item error', { message: item.message });
+                if (isNonFatalCodexNotice(item.message)) {
+                  logger.warn('Codex item notice', { message: item.message });
+                } else {
+                  errorMessage = item.message;
+                  logger.error('Codex item error', { message: item.message });
+                }
               }
               break;
             // reasoning / file_change / mcp_tool_call / web_search / todo_list:

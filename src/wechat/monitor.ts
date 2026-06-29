@@ -102,7 +102,8 @@ export function createMonitor(api: WeChatApi, callbacks: MonitorCallbacks, accou
 
         consecutiveFailures++;
         const errorMsg = err instanceof Error ? err.message : String(err);
-        logger.error('Monitor error', { error: errorMsg, consecutiveFailures });
+        const log = consecutiveFailures >= BACKOFF_THRESHOLD ? logger.error.bind(logger) : logger.warn.bind(logger);
+        log('Monitor error', { error: errorMsg, consecutiveFailures });
 
         const backoff = consecutiveFailures >= BACKOFF_THRESHOLD ? BACKOFF_LONG_MS : BACKOFF_SHORT_MS;
         logger.info(`Backing off ${backoff}ms`, { consecutiveFailures });

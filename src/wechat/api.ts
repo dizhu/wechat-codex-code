@@ -34,6 +34,13 @@ function summarizeResp(json: unknown): Record<string, unknown> {
 
 const TRUSTED_HOSTS = ['weixin.qq.com', 'wechat.com'];
 
+function positiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 /**
  * Whether a URL is an https endpoint on a trusted WeChat/Tencent host. Used to
  * vet both the configured baseUrl and any server-supplied URL (e.g. CDN upload
@@ -54,7 +61,10 @@ export class WeChatApi {
   private readonly baseUrl: string;
   private readonly uin: string;
   private readonly nextSendTime = new Map<string, number>();
-  private static readonly MIN_SEND_INTERVAL = 2500;
+  private static readonly MIN_SEND_INTERVAL = positiveIntEnv('WCX_MIN_SEND_INTERVAL_MS', 10_000);
+  private static readonly SEND_MAX_RETRIES = positiveIntEnv('WCX_SEND_MAX_RETRIES', 4);
+  private static readonly SEND_INITIAL_BACKOFF_MS = positiveIntEnv('WCX_SEND_INITIAL_BACKOFF_MS', 15_000);
+  private static readonly SEND_MAX_BACKOFF_MS = positiveIntEnv('WCX_SEND_MAX_BACKOFF_MS', 120_000);
 
   constructor(token: string, baseUrl: string = 'https://ilinkai.weixin.qq.com') {
     if (baseUrl && !isTrustedWechatUrl(baseUrl)) {
@@ -137,21 +147,20 @@ export class WeChatApi {
       }
     }
 
-    const MAX_RETRIES = 2;
-    let delay = 3_000;
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    let delay = WeChatApi.SEND_INITIAL_BACKOFF_MS;
+    for (let attempt = 0; attempt <= WeChatApi.SEND_MAX_RETRIES; attempt++) {
       const res = await this.request<{ ret?: number }>('ilink/bot/sendmessage', req);
       if (res.ret === -2) {
         if (userId) {
           this.nextSendTime.set(userId, Date.now() + delay + WeChatApi.MIN_SEND_INTERVAL);
         }
-        if (attempt === MAX_RETRIES) {
-          logger.warn('sendMessage rate-limited after max retries', { attempts: MAX_RETRIES });
-          throw new Error(`sendMessage rate-limited after ${MAX_RETRIES} retries`);
+        if (attempt === WeChatApi.SEND_MAX_RETRIES) {
+          logger.warn('sendMessage rate-limited after max retries', { attempts: WeChatApi.SEND_MAX_RETRIES });
+          throw new Error(`sendMessage rate-limited after ${WeChatApi.SEND_MAX_RETRIES} retries`);
         }
         logger.warn('sendMessage rate-limited (ret:-2), retrying', { attempt, delayMs: delay });
         await new Promise(r => setTimeout(r, delay));
-        delay = Math.min(delay * 2, 15_000);
+        delay = Math.min(delay * 2, WeChatApi.SEND_MAX_BACKOFF_MS);
         continue;
       }
       // Any other non-success ret (e.g. -1 invalid context_token, -14 expired

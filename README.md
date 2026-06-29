@@ -177,7 +177,12 @@ npm run daemon -- restart
 |------|------|
 | `WCX_DATA_DIR` | 覆盖数据目录（默认 `~/.wechat-codex-code`） |
 | `WCX_SHOW_COMMANDS=1` | 把 Codex 每条 shell 命令作为进度推到微信（默认关，避免刷屏 / 限频） |
+| `WCX_STREAM_TEXT=1` | 边生成边推送部分回复（默认关：等回复完整后一次性发送，更省条数 / 不易触发限频） |
 | `WCX_SANDBOX` | Codex 沙箱策略：`read-only` / `workspace-write` / `danger-full-access`（配 `--ask-for-approval never`）。**默认不设 = 绕过沙箱与审批**（完全权限，等同历史行为）。注重安全可设为 `workspace-write` 把 Codex 限制在工作区内 |
+| `WCX_MIN_SEND_INTERVAL_MS` | 同一用户两条消息之间的最小间隔（默认 `10000`，即 10s，防微信限频） |
+| `WCX_SEND_MAX_RETRIES` | 发送遇限频（ret:-2）时的最大重试次数（默认 `4`） |
+| `WCX_SEND_INITIAL_BACKOFF_MS` | 发送重试的初始退避（默认 `15000`，每次翻倍） |
+| `WCX_SEND_MAX_BACKOFF_MS` | 发送重试退避上限（默认 `120000`） |
 | `WCX_LOG_FULL_BODY=1` | 调试：完整打印 ilink API 请求体 |
 | `OPENAI_API_KEY` / `CODEX_HOME` | 透传给 daemon（若你用 API key 方式而非 `codex login`） |
 
