@@ -126,16 +126,21 @@ export async function codexQuery(options: QueryOptions): Promise<QueryResult> {
   // WeChat, so any approval prompt would hang the query.
   const SANDBOX_MODES = ['read-only', 'workspace-write', 'danger-full-access'];
   const sandboxMode = process.env.WCX_SANDBOX;
-  if (sandboxMode && SANDBOX_MODES.includes(sandboxMode)) {
+  if (!sandboxMode) {
+    // Unset: historical default — full access, no approvals.
+    common.push('--dangerously-bypass-approvals-and-sandbox');
+  } else if (SANDBOX_MODES.includes(sandboxMode)) {
     common.push('--sandbox', sandboxMode, '--ask-for-approval', 'never');
   } else {
-    if (sandboxMode) {
-      logger.warn('Ignoring invalid WCX_SANDBOX; falling back to bypass mode', {
-        value: sandboxMode,
-        validModes: SANDBOX_MODES,
-      });
-    }
-    common.push('--dangerously-bypass-approvals-and-sandbox');
+    // Set but invalid (e.g. a typo like `readonly`): the operator clearly meant
+    // to confine Codex, so FAIL SAFE to the most restrictive mode rather than
+    // silently granting full host access — getting bypass when you asked for a
+    // sandbox is the dangerous outcome.
+    logger.warn('Invalid WCX_SANDBOX; failing safe to read-only', {
+      value: sandboxMode,
+      validModes: SANDBOX_MODES,
+    });
+    common.push('--sandbox', 'read-only', '--ask-for-approval', 'never');
   }
   if (model) common.push('--model', model);
   for (const p of tempImagePaths) common.push('--image', p);

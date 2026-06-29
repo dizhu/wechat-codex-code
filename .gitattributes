@@ -1,0 +1,10 @@
+# Normalize all text files to LF in the repo, regardless of the editor's
+# platform, so line endings can't drift (one file had been committed as CRLF).
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary

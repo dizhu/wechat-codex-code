@@ -277,6 +277,24 @@ async function runDaemon(): Promise<void> {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 
+  // A stray rejection from any one bot's async work must not take down every
+  // other bot. Log and keep running for unhandled rejections; for a truly
+  // uncaught exception the process state may be corrupt, so log and exit so the
+  // supervisor (launchd KeepAlive / systemd Restart=always) restarts cleanly.
+  process.on('unhandledRejection', (reason) => {
+    logger.error('Unhandled promise rejection (daemon continues)', {
+      reason: reason instanceof Error ? reason.message : String(reason),
+      stack: reason instanceof Error ? reason.stack : undefined,
+    });
+  });
+  process.on('uncaughtException', (err) => {
+    logger.error('Uncaught exception, exiting for supervisor restart', {
+      error: err.message,
+      stack: err.stack,
+    });
+    process.exit(1);
+  });
+
   logger.info('Daemon started', { bots: usable.length });
   console.log(`已启动 (${usable.length} 个 bot: ${usable.map((a) => a.accountId).join(', ')})`);
 
@@ -658,6 +676,11 @@ async function sendToCodex(
     let textBuffer = '';
     let anySent = false;
     let lastSentTime = Date.now();
+    // Number of flush operations currently sending. The keepalive must not fire
+    // while a flush is in progress: a rate-limited flush (10s/msg + up to 120s
+    // backoff over many chunks) can legitimately exceed the 5-min silence window
+    // and would otherwise inject "我还在处理中" into the middle of the answer.
+    let activeSends = 0;
 
     const MIN_BATCH_FLUSH_LEN = STREAM_PARTIAL_TEXT ? 800 : Number.POSITIVE_INFINITY;
     const SOFT_FLUSH_LIMIT = 3600;
@@ -679,9 +702,14 @@ async function sendToCodex(
       if (!captured) return flushChain;
 
       flushChain = flushChain.then(async () => {
-        const sent = await safeSendChunks(captured, 'flushText');
-        if (sent) anySent = true;
-        lastSentTime = Date.now();
+        activeSends++;
+        try {
+          const sent = await safeSendChunks(captured, 'flushText');
+          if (sent) anySent = true;
+        } finally {
+          activeSends--;
+          lastSentTime = Date.now();
+        }
       }).catch((err) => {
         logger.error('flushText send failed', { error: err instanceof Error ? err.message : String(err) });
       });
@@ -691,7 +719,7 @@ async function sendToCodex(
     // Safety net: send keepalive if nothing was sent for 5 minutes
     const SILENCE_WARNING_MS = 5 * 60 * 1000;
     flushTimer = setInterval(() => {
-      if (Date.now() - lastSentTime > SILENCE_WARNING_MS) {
+      if (activeSends === 0 && Date.now() - lastSentTime > SILENCE_WARNING_MS) {
         const msg = SILENCE_MESSAGES[Math.floor(Math.random() * SILENCE_MESSAGES.length)];
         sender.sendText(fromUserId, contextToken, msg).catch(() => {});
         lastSentTime = Date.now();
@@ -744,6 +772,12 @@ async function sendToCodex(
       queryOptions.resume = undefined;
       session.sdkSessionId = undefined;
       sessionStore.save(sessionKey, session);
+      // Reset streaming state so the retry's output is delivered on its own
+      // terms: drop any unflushed partial from attempt 1 and clear anySent, so
+      // the retry's full answer isn't suppressed by the `!anySent` guard (and
+      // its buffer isn't concatenated onto attempt 1's leftovers).
+      textBuffer = '';
+      anySent = false;
       const retryResult = await codexQuery(queryOptions);
       // Prefer the retry's output, but fall back to the first attempt's partial
       // text / session id so an early-failing retry (empty text, no session id)

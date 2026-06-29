@@ -46,8 +46,13 @@ macos_start() {
   local plist_extra_env=""
   for var in OPENAI_API_KEY OPENAI_BASE_URL CODEX_HOME WCX_SANDBOX WCX_SHOW_COMMANDS WCX_STREAM_TEXT WCX_DATA_DIR WCX_LOG_FULL_BODY WCX_MIN_SEND_INTERVAL_MS WCX_SEND_MAX_RETRIES WCX_SEND_INITIAL_BACKOFF_MS WCX_SEND_MAX_BACKOFF_MS; do
     if [ -n "${!var:-}" ]; then
+      local val="${!var}"
+      # Reject newlines (would inject extra plist/unit content) and XML-escape
+      # the value so it can't break out of the <string> element.
+      case "$val" in *[$'\n\r']*) echo "warning: skipping $var (contains newline)" >&2; continue;; esac
+      val="${val//&/&amp;}"; val="${val//</&lt;}"; val="${val//>/&gt;}"
       plist_extra_env="${plist_extra_env}    <key>${var}</key>
-    <string>${!var}</string>
+    <string>${val}</string>
 "
     fi
   done
@@ -83,6 +88,9 @@ ${plist_extra_env}  </dict>
 </dict>
 </plist>
 PLIST
+
+  # The plist embeds secret env (OPENAI_API_KEY etc.); keep it owner-only.
+  chmod 600 "$plist_path"
 
   launchctl load "$plist_path"
   echo "Started wechat-codex-code daemon (macOS launchd)"
@@ -179,6 +187,9 @@ linux_create_service_file() {
   local extra_env=""
   for var in OPENAI_API_KEY OPENAI_BASE_URL CODEX_HOME WCX_SANDBOX WCX_SHOW_COMMANDS WCX_STREAM_TEXT WCX_DATA_DIR WCX_LOG_FULL_BODY WCX_MIN_SEND_INTERVAL_MS WCX_SEND_MAX_RETRIES WCX_SEND_INITIAL_BACKOFF_MS WCX_SEND_MAX_BACKOFF_MS; do
     if [ -n "${!var:-}" ]; then
+      # Reject newlines: a value containing one could inject extra unit
+      # directives (e.g. a second ExecStart) into the [Service] section.
+      case "${!var}" in *[$'\n\r']*) echo "warning: skipping $var (contains newline)" >&2; continue;; esac
       extra_env="${extra_env}Environment=${var}=${!var}
 "
     fi
@@ -206,7 +217,8 @@ PrivateTmp=true
 WantedBy=default.target
 SERVICE
 
-  chmod 644 "$service_file"
+  # The unit embeds secret env (OPENAI_API_KEY etc.); keep it owner-only.
+  chmod 600 "$service_file"
 }
 
 linux_reload_daemon() {

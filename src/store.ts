@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, chmodSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, chmodSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 import { logger } from "./logger.js";
 
@@ -32,8 +32,18 @@ export function loadJson<T>(filePath: string, fallback: T): T {
 export function saveJson(filePath: string, data: unknown): void {
   mkdirSync(dirname(filePath), { recursive: true });
   const raw = JSON.stringify(data, null, 2) + "\n";
-  writeFileSync(filePath, raw, "utf-8");
-  if (process.platform !== 'win32') {
-    chmodSync(filePath, 0o600);
+  // Write to a temp file then rename: rename is atomic on the same filesystem,
+  // so a crash/SIGKILL mid-write can't leave a truncated/empty JSON that would
+  // otherwise wipe a session's history or reset a sync cursor on next load.
+  const tmp = `${filePath}.tmp-${process.pid}`;
+  try {
+    writeFileSync(tmp, raw, "utf-8");
+    if (process.platform !== 'win32') {
+      chmodSync(tmp, 0o600);
+    }
+    renameSync(tmp, filePath);
+  } catch (err) {
+    try { unlinkSync(tmp); } catch { /* nothing to clean up */ }
+    throw err;
   }
 }
